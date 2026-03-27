@@ -1,0 +1,523 @@
+# Title: Bin Packing Solver using MIPS Assembly
+# Output File Name: output.txt
+
+################ Data Segment ##################
+.data
+# ================== VARIABLES =================
+	fileName:     .space 50  # File name maximum length is 50
+	outFileName:  .asciiz "output.txt"
+	heuristicN:   .space 50  # maximum length is 50
+	fileContent:  .space 8000  # File Maximum Size is 8000 B
+	lineBuffer:   .space 50  # Buffer Max Size 50B
+	strq1:        .asciiz "q\n"
+	strq2:	      .asciiz "Q\n"	
+	floatOne:     .float 1.0
+	itemsArray:   .word -1 : 2000  # Initialize An Array of 2000 Items with Value Set to -1 ( This Array Tells us which bin the item is in)
+	binsArray:    .float 1.0 : 2000 # Initialize An Array of 2000 Bins each with 1.0 Free Space
+	roundingError:.float 0.000001 # Machine Epsilon we used this to fix the rounding problem of single precision floats
+	messageBins:  .asciiz "Minimum Number of Bins : " 
+	newLine:      .asciiz "\n"
+	messageBin:   .asciiz "Bin "
+	messageDots:  .asciiz ": "
+	messageItem:  .asciiz "Item "
+	messageSpace: .asciiz " | "
+	intstr:       .space 12 #12 Bytes used as a buffer for converting int2str
+# =================== MACROS ===================
+# Macro used to print a string to console
+.macro print_str (%str)
+	.data
+myLabelStrMacro: .asciiz %str
+	.text
+	li $v0, 4
+	la $a0, myLabelStrMacro
+	syscall
+.end_macro
+
+# Macro used to end program execution
+.macro done
+	li $v0,10
+	syscall
+.end_macro
+	
+# Macro used to print a string to file, it calculates the length of the string and prints it
+.macro strToFile (%fd, %strLabel)
+	la $t0, %strLabel # Label of the string
+	move $t2, $zero # $t2 is used to find the length of the string
+strLength: # Calculate Length
+	lb $t1, 0($t0) # Load Char
+	beqz $t1, strLengthFound # Check if null, if yes then exit
+    	addi $t2, $t2, 1 #Increment Length
+ 	addi $t0, $t0, 1 #Go to next Char
+	j strLength
+strLengthFound:
+	li $v0, 15 #Write to File
+	move $a0, %fd # file descriptor
+	la $a1, %strLabel # string address
+	move $a2, $t2 # Length of string to print
+	syscall
+.end_macro
+
+# Macro used to print a string to file using reg, it calculates the length of the string and prints it
+.macro strToFile1 (%fd, %reg)
+	move $t0, %reg # address of the string
+	move $t2, $zero # $t2 is used to find the length of the string
+strLength1: # Calculate Length
+	lb $t1, 0($t0) # Load Char
+	beqz $t1, strLengthFound1 # Check if null, if yes then exit
+    	addi $t2, $t2, 1 #Increment Length
+ 	addi $t0, $t0, 1 #Go to next Char
+	j strLength1
+strLengthFound1:
+	li $v0, 15 #Write to File
+	move $a0, %fd # file descriptor
+	move $a1, %reg # string address
+	move $a2, $t2 # Length of string to print
+	syscall
+.end_macro
+# ==============================================
+################ Code Segment ##################
+.text 
+# ===================== Main ===================== 
+main:
+	print_str("\n==================================\n")
+	print_str("Welcome to Bin Packer using MIPS\n")
+	print_str("==================================\n")
+	print_str("Please Enter Input File Name (Or Enter Q to Exit):")
+	# Getting File Name from user input
+	li $v0, 8
+	la $a0, fileName
+	li $a1, 50
+	syscall
+	
+	# Compare Against q
+	la $a0, fileName
+	la $a1, strq1  #Load address of str  "q"
+	b compareStrings1  #Compare Strings and exit if Q entered 
+	
+	# Compare Against Q
+compareQ:	
+	la $a0, fileName
+	la $a1, strq2 #Load address of str "Q"
+	b compareStrings2  #Compare Strings and exit if Q entered 
+	
+    # Remove New Line From File Name
+notEqualCheckFile:
+    li $t1, 0x0A  	#New Line Char ASCII
+    li $t2, 0x00       #Null Terminator ASCII
+    la $a0, fileName   #Pointer to file name
+    b SearchForNewLineAndRemoveIt
+newlineremoved:  # Branch Back Here After Processing File Name
+
+    # Open Input File
+    li $v0, 13  #Syscall for File Opening
+    la $a0, fileName #Pointer to file name
+    li $a1, 0  #Read Mode (0)
+    li $a2, 0
+    syscall
+    move $s0, $v0 #Save File descriptor
+    bltz $s0, fileNotFound  #If File Descriptor is negative then print Error
+    print_str("Opening File...\n")
+    
+    # Read file content into a buffer
+    li $v0, 14  # Syscall for reading a file
+    move $a0, $s0  # File Descriptior
+    la $a1, fileContent     # Buffer to hold file content
+    li $a2, 8000   # Maximum number of bytes to read into the buffer
+    syscall
+    move $s1, $v0  # Save the number of bytes read into $s1
+    
+    #Read Heursitic Type and save it in $s6 (0:FF /1:BF)
+    print_str("Choose Heuristic: First Fit (FF) / Best Fit (BF):")
+	li $v0, 8
+	la $a0, heuristicN
+	li $a1, 50
+	syscall
+	
+	# Check Heuristic Type
+	j compareStringsFF
+HReady:  # Get Back Here After Choosing Heuristic
+
+    # Convert Buffer Into Floats
+    la $t4, fileContent  # Buffer for file content
+newLineSoResetBuffer:    
+    la $t2, lineBuffer  # Buffer Used to store substring, before converting to float
+processInput1:	
+    lb $t3, 0($t4)  # Load Char from File Content
+    beq $t3, $zero, EofSoLastLine # If loaded Char is null terminator, then we reached the end
+    sb $t3, 0($t2)  #Store Char in Substring lineBuffer
+    beq $t3, 0x0A, newLineSoConvert # If new line then convert float
+    # Now Increment indexes to go to next char
+    addi $t4, $t4, 1
+    addi $t2, $t2, 1
+    j processInput1
+newLineSoConvert:  # Convert String with ASCII to Floating Point
+    addi $t4, $t4, 1  # Skip the new line Char
+    sb $zero, 0($t2)  # Terminates the Substring with a null terminator
+    
+    jal ValidateAndConvert  # Validate and Convert to float in $f3
+    
+    jal packBins # Pack the item size (float in $f3) here based on Heurstic Type
+    
+    j newLineSoResetBuffer
+EofSoLastLine:  #Process Last Line
+    sb $zero, 0($t2)  # Terminates the Substring with a null terminator
+    
+    jal ValidateAndConvert  # Validate and Convert to float in $f3
+    
+    jal packBins # Pack the item size (float in $f3) here based on Heurstic Type
+    
+    # CLOSE INPUT FILE
+    li $v0, 16     # syscall for close_file
+    move $a0, $s0  # file descriptor
+    syscall
+    
+    # Print Output to File Here
+    j printOutput # Print To Output File
+donePrintOutput:    
+    print_str("\n--> Output File Ready\n")
+    	
+    jal resetBins # Reset Bins Arrays Used for the next run
+    jal resetFileBuffer # Reset fileContent
+b main  #Unconditional Branch back to main - While Loop
+# ================= HELPING FUNCTIONS/CODE ================== 
+# ==== Compare Strings, used to exit when q entered ====
+compareStrings1:
+		lb $t0, 0($a0) # Input String
+		lb $t1, 0($a1) # String for comparison
+		bne $t0, $t1, compareQ
+		beq $t0, $zero, exit # Equal String, Exit
+		# Increment String Address (Move to next Char)
+		addi $a0, $a0, 1
+		addi $a1, $a1, 1
+j  compareStrings1
+compareStrings2:
+		lb $t0, 0($a0) # Input String
+		lb $t1, 0($a1) # String for comparison
+		bne $t0, $t1, notEqualCheckFile
+		beq $t0, $zero, exit # Equal String, Exit
+		# Increment String Address (Move to next Char)
+		addi $a0, $a0, 1
+		addi $a1, $a1, 1
+j  compareStrings2
+
+# ==== Function used to tell Heuristic type ====
+# Sets the value of $s6 to (0:FF/ 1:BF)
+compareStringsFF:
+# Initialize $s6 = -2
+# Check string input first two chars, if char 'F' encountered increment by $s6 1
+# If char 'B' encountered increment $s6 by 2
+# When char newline'\n' encountered then we are done
+# Finally if "FF" -> $s6 = 0, if "BF" -> $s6 = 1 
+	li $s6, -2  # Initilize to -2
+	lb $t1, heuristicN  # Load First Char
+	beq $t1, 113, exit  # If Q enetered then Exit
+	beq $t1, 81, exit  # If Q entered then Exit
+	beq $t1, 102, incByOne  #Check if f
+	beq $t1, 70, incByOne   #Check if F
+	beq $t1, 66, incByTwo  #Check if B
+	beq $t1, 98, incByTwo  #Check if b
+	# If We Got Here then Invalid, Print Error and Exit
+	print_str("\nInvalid Heuristic Input\n")
+	done
+	#If Not Invalid Increment Accordingly
+incByOne:
+	addi $s6, $s6, 1
+	b doneIncByOne
+incByTwo:
+	addi $s6, $s6, 2
+	b doneIncByOne
+doneIncByOne:  # After First Char Check the second one if its F or f
+	lb $t1, heuristicN+1 # Load Second Char
+	beq $t1, 102, incByOne2  #Check if f
+	beq $t1, 70, incByOne2  #Check if F
+	#If we got here then invalid
+	print_str("\nInvalid Heuristic Input\n")
+	done
+incByOne2:
+	addi $s6, $s6, 1
+	#When We Got Here We check if last Char is NewLine and Then Terminate
+	lb $t1, heuristicN+2 # Load Third Char
+	beq $t1, 0x0A, HReady
+	#If Got Here Then Invalid
+	print_str("\nInvalid Heuristic Input\n")
+	done
+	
+# ==== Remove New Line from File Name String ====
+SearchForNewLineAndRemoveIt:
+    la $t3, fileName      # Temporary pointer to fileName
+search_loop:
+    lb $t0, 0($t3)        # Load byte
+    beq $t0, $t1, removeNewLine  # If '\n'
+    beq $t0, $t2, newlineremoved # If '\0'
+    addi $t3, $t3, 1
+    j search_loop
+removeNewLine:
+    sb $t2, 0($t3)         # Replace '\n' with '\0'
+    j newlineremoved
+    
+# ==== HANDLE FILE OPEN ERROR ====
+fileNotFound:
+    print_str("Error in Opening File - File not found!\n")
+    print_str("Please make sure the file exists\n")
+    print_str("Please make sure the input file (.txt) is in the same directory as the MARS executable file (.jar)\n")
+    j main
+    
+# ==== Validate String and Turn into Float ====
+ValidateAndConvert:
+    la $t2, lineBuffer  # Buffer Used to store substring, before converting to float
+    lb $t6, 0($t2)
+    beq $t6, 0x30, firstIsZero
+    beq $t6, 0x31, firstIsOne
+    # If we got here then invalid
+    j invalidNotDone
+firstIsZero:
+	addi $t2, $t2 , 1 # Move to next char
+	lb $t6, 0($t2)  # Load Char
+	bne $t6, 0x2E, invalidNotDone  # If not dot then invalid
+	addi $t2, $t2 , 1 # Move to next char after dor
+	move $a2, $t2  #Move Address of null terminated string ( Decimal Part of Floating Point String ) to pass to str2int function
+	j str2int  #Output is unsigned integer value in $v0
+callerOfStr2Int:  
+	# $v1 : Integer Decimal Part || $t8: Divisor
+	mtc1 $v1, $f1  # $f1 now has Integer Decimal Part
+	mtc1 $t8, $f2  # $f2 now has Divisor
+	cvt.s.w $f1, $f1  # Convert to float
+	cvt.s.w $f2, $f2  # Convert to float
+	div.s $f3, $f1, $f2  # $f3 has 0.DECIMALPART
+	jr $ra
+firstIsOne: # Only 1.0 is Valid
+	#Check if next is . and 0 and /0
+	addi $t2, $t2 , 1 # Move to next char
+	lb $t6, 0($t2)  # Load Char
+	bne $t6, 0x2E, invalidNotDone  # If not dot then invalid
+	addi $t2, $t2 , 1 # Move to next char
+	lb $t6, 0($t2)  # Load Char
+	bne $t6, 0x30, invalidNotDone  # If not 0 then invalid
+	addi $t2, $t2 , 1 # Move to next char
+	lb $t6, 0($t2)  # Load Char
+	bne $t6, $zero, invalidNotDone  # If not null terminator then invalid
+	l.s $f3, floatOne  # $f3 = 1.0
+	jr $ra
+	
+# ==== Convert String to Integer ====
+# Input: $a2 = address of null terminated string
+# Output: $v1 = unsigned integer value
+str2int:
+li $v1, 0 # Initialize: $v0 = sum = 0
+li $t0, 10 # Initialize: $t0 = 10
+li $t8, 1  # This is the divisior, multiply it by 10 for each digit
+li $t9, 10 # This is a 10 to multiply by
+L1:
+lb $t1, 0($a2) # load $t1 = str[i]
+blt $t1, 0x30, checkIfDoneOrInvalid # exit loop if ($t1 < '0')
+bgt $t1, 0x39, checkIfDoneOrInvalid # exit loop if ($t1 > '9')
+addiu $t1, $t1, -48 # Convert character to digit
+mul $v1, $v1, $t0 # $v0 = sum * 10
+addu $v1, $v1, $t1 # $v0 = sum * 10 + digitF
+addiu $a2, $a2, 1 # $a0 = address of next char
+mul $t8, $t8, $t9  # Divisor = Divisor * 10
+j L1 # Loop Back if valid digits encountered
+checkIfDoneOrInvalid:
+	bne $t1, $zero, invalidNotDone
+	j callerOfStr2Int # return to caller
+invalidNotDone:
+	print_str("\nInvalid Input Format\nMake Sure all inputs are floats (0.0< and <=1.0) with format: \"IntegerPart.DecimalPart\"\n")
+	done
+	
+# ==== Convert Integer to String ====
+# Input: $a0 = value, $a1 = buffer address (12 bytes)
+# Output: $k1 = address of converted string in buffer
+int2str:
+li $t0, 10 # $t0 = divisor = 10
+move $k1, $zero
+addiu $k1, $a1, 11 # start at end of buffer
+sb $zero, 0($k1) # store a NULL character
+L2: divu $a0, $t0 # LO = value/10, HI = value%10
+mflo $a0 # $a0 = value/10
+mfhi $t1 # $t1 = value%10
+addiu $t1, $t1, 48 # convert digit into ASCII
+addiu $k1, $k1, -1 # point to previous byte
+sb $t1, 0($k1) # store character in memory
+bnez $a0, L2 # loop if value is not 0
+jr $ra # return to caller
+		
+# ==== Bin Packing Heurstics (First Fit And Best Fit) ====
+# $f3: Float (Item Size) to pack
+# $s6: Heuristic Type: (FF = 0 / BF = 1)
+# itemsArray --> Used To Print Which Items does Bin Contain
+# binsArray  --> Used to Decide which bin to place item
+# $t5 --> Bin Index
+# $s3 --> Min Number of Bins
+# $s2 --> Index of Item to Pack = (Number of Packed Items * 4)
+# $f4 --> Has the free space of the current bin
+packBins:
+	move $t5, $zero  #Initilize Bins Index to Zero
+	l.s $f17, roundingError  # Load Register $f17 with this value
+	beq $s6, $zero, packUsingFF #If Zero Pack Using FF
+packUsingBF: #If not zero then must be 1 -> So Pack Using Best Fit
+	# $t6: Index of Best Bin
+	# $f13: Measure Used To Check Best Bin
+	li $t6, -1  # -1 is initial value indicating no best bin has been found yet
+	lwc1 $f13, floatOne  # $f13 is used as following: $f13 = Left Over Space After Adding Item to a Fitting Bin = Bin Free Space - Item Size
+	# Worst Left Over Space is 1.0, it indicates that no bin has been found yet, as any found bin will have better left over space than this.
+whileBinsBF:  # Traverse Bins and find the index of the best fitting Bin
+	lwc1 $f4,binsArray($t5)  #$f4 has now free space of bin
+	sub.s $f18, $f3, $f17  # $f18 holds the $f3 - possible error
+	c.le.s $f18, $f4  # if $f18 <= $f4, this is used to get rid of floats rounding issues
+        bc1f goToNextBinBF # If it does not fit, then go to next bin
+        # If We Got Here then we have a fitting Bin, Check if its best fitting
+        sub.s $f14, $f4, $f3  # Left Over Space = Free Space - Item Size
+        c.lt.s $f14, $f13 # Check if its the best fitting
+        bc1f goToNextBinBF # It is not the best, so go to next Bin
+        # If We Got Here then we have a Best Fitting Bin
+        mov.s $f13, $f14  # Update Best Fit, Left Over Space
+        move $t6, $t5  # Update The Index of the Best Bin
+        #If we got here we have the best bin
+        # We want to stop the search when encountering an empty bin. So When Going to next Bin, check if we were in an empty bin
+        # -> If yes, then the best bin index is ready so pack into it. Fall through to goToNextBinBF
+goToNextBinBF:  #Increment Bin Index, and go back to loop
+	#Check If we were in an empty bin
+	l.s $f15, floatOne  # 1.0
+	c.eq.s $f4, $f15 # Check if bin empty
+	bc1t packBF # If the bin is empty, so best bin is already found -> So Pack 
+	addi $t5, $t5, 4  #Go to next bin index, if the best bin is not found yet
+	j whileBinsBF  #Go Back to Loop
+packBF:
+	move $t5, $t6 # Move Current Bin Index to Best Bin
+	lwc1 $f4,binsArray($t6)  # $f4 has now free space of best bin
+	j packItemInBin  # Pack The Item
+packUsingFF: #Pack Using First Fit Heuristic
+	whileBinsFF: #Traverse Bins Array, find the suitable bin: in this case first bin with enough space
+	lwc1 $f4,binsArray($t5)  #$f4 has now free space of bin
+	sub.s $f18, $f3, $f17  # $f18 holds the $f3 - possible error
+	c.le.s $f18, $f4  # if $f18 <= $f4, this is used to get rid of floats rounding issues
+	bc1t packItemInBin   # then branch
+	#Else Go to next bin
+	addi $t5, $t5, 4  #Go to next bin index
+	j whileBinsFF
+packItemInBin:  #Pack the Item in Current Bin Index	
+	# If the bin is found update the free space
+	# new free space = old free space - item size
+	l.s $f5, floatOne  # F5 = 1.0
+	c.eq.s $f4, $f5
+	bc1t incrementMinBins #If its a new bin then increment the count of used bins
+incMinDone:	
+	sub.s $f4, $f4, $f3  # Store the New Free Space Back Into the Bins Array
+	swc1 $f4,binsArray($t5)
+	# Adjust The Items Array So it says which bin the item went into
+	# Bin Number = Bin Index / 4
+	div $t5, $t5, 4# $t5 now has BIN Number
+	sw $t5, itemsArray($s2)
+	addi $s2, $s2, 4 # Increment Index to Next Item
+	jr $ra # Return To Caller after Updating binsArray, itemsArray, Number of Minimum Bins $s3, Index of next item to pack $s2
+incrementMinBins:  #Increment The Number of Minimum Bins
+	addi $s3, $s3, 1
+	j incMinDone	# Go Back
+	
+# ==== Re-Initialize Arrays and Counters of Bins ====
+resetBins:  # Reset Arrays and Variables after using them.
+	move  $s2, $zero  # Clear $s2
+	move  $s3, $zero  # Clear $s3
+	li $t0, 2000  # There are 2000 values to reset ( array size )
+	li $t3, -1  # Set $t3 to -1
+	la $t1, itemsArray  # Load Address of Array
+	la $t2, binsArray  # Load Address of Array
+	l.s $f10, floatOne # load 1.0 into $f10
+loopReset:
+	sw $t3, 0($t1) # itemsArray[i] = –1
+	swc1 $f10,   0($t2) # binsArray[i]  = 1.0
+	addi $t1, $t1, 4  # Increment Index
+	addi $t2, $t2, 4  # Increment Index
+	addi $t0, $t0, -1 # Decrement Counter
+	bgtz $t0, loopReset
+	jr $ra  # Return to caller
+	
+# ==== Print Output File ====
+printOutput:  # Uses the itemsArray, Minimum Bins Number ($s3), Index of Item To Pack ($s2)(Number Of Items/4), To print the output to file
+	# Open File in write mode to erase its content, then close and open again in append mode to create output
+	li $v0, 13  # Open File
+	la $a0, outFileName  # File Name
+	li $a1, 1  # Write Mode
+	li $a2, 0
+	syscall
+	move $s0, $v0  # Save File Descriptor
+	# Close file, so we can open it again in append mode
+	li $v0, 16  #Close File
+	move $a0, $s0
+	syscall
+	#Open File in append mode
+	li $v0, 13  # Open File
+	la $a0, outFileName  # File Name
+	li $a1, 9  # Append Mode
+	li $a2, 0
+	syscall
+	move $s0, $v0  # Save File Descriptor
+	#Start Appending Output
+	strToFile ($s0,messageBins) # Print Minimum Number of Bins Message
+	#$k1 will have the address of null terminated string
+	move $a0, $s3  # a0 must have the integer to convert
+	la $a1, intstr # $a1 must have the buffer used to convert
+	jal int2str  # Convert The Integer in $a0 to a string with its address in $k1
+	strToFile1($s0,$k1)  # print the string with its address in $k1 to the file with fd in $s0
+	strToFile ($s0,newLine) # New Line
+	# We Have Number of Minimum Bins -> If we traverse Array Once For Each Bin, and print The Items with the Bin Number, then we can tell which items are packed in each bin
+	li $t7, 0 #Initilize Bin Index to 0
+PNB:	
+	beq $t7, $s3, donePrintBins # Exit when finished used bins
+	la $t6, itemsArray #Load Adress of Items Array
+	li $t8, 1 # Item Index to 1
+	strToFile($s0,messageBin) # Print "Bin "
+	add $t9, $t7, 1
+	move $a0, $t9  # a0 must have the integer to convert
+	la $a1, intstr # $a1 must have the buffer used to convert
+	jal int2str  # Convert The Integer in $a0 to a string with its address in $k1
+	strToFile1($s0,$k1)  # Print Bin Number
+	strToFile($s0,messageDots) # Print ": "
+whilePrintBins:
+	lw $t5, 0($t6) #Load First Item to $t5
+	beq $t5, -1, printNextBin # If We reached an item $t6 with -1 then we are done
+	beq $t5, $t7, printCurrentItem # If the bin for current item equals current Bin, then print the current Item
+donePCI:	
+	addi $t8, $t8, 1 # Increment Item Count
+	addi $t6, $t6, 4 # Go to next Item in Items Array
+	j whilePrintBins  # Go Back To Next Item
+printCurrentItem:
+	strToFile($s0,messageItem)
+	move $a0, $t8  # a0 must have the integer to convert
+	la $a1, intstr # $a1 must have the buffer used to convert
+	jal int2str  # Convert The Integer in $a0 to a string with its address in $k1
+	strToFile1($s0,$k1)  # print the string with its address in $k1 to the file with fd in $s0
+	strToFile($s0,messageSpace)
+	j donePCI
+printNextBin: #Increment Bin Index, Reset $t6
+	addi $t7, $t7, 1 # Go to Next Bin
+	strToFile($s0,newLine)
+	j PNB # Go back to reseting $t6
+donePrintBins:	
+	#Close File when done
+	li $v0, 16
+	move $a0, $s0
+	syscall
+	j donePrintOutput # Go Back To Main
+	
+# === Reset File Content Buffer ===
+resetFileBuffer:
+	la $t0, fileContent
+	move $t1, $s1 # buffer size to clear
+	li $t2, 0 # Zero to clear buffer
+resetBufferBytes:
+	beqz $t1, doneResetBuffer # if counter reaches 0 then we are done
+	sb $t2, 0($t0) # clear current bute
+	addi $t0, $t0, 1 # move to next byte
+	addi $t1, $t1, -1 # decrement used bytes counter
+	j resetBufferBytes
+doneResetBuffer:
+	jr $ra  # Return to caller
+	
+# === Exit Program ===
+exit:
+	print_str("\n=====================================\n")
+	print_str("Thanks for using our program = Goodbye :)\n")
+	print_str("=====================================\n")
+	done
+################# END OF CODE ##################
